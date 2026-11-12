@@ -217,6 +217,14 @@ export function getOrCreateTerm(panelId: string, cwd: string, launchId?: number)
   // event then passes as a real output-follow and poisons the anchor to
   // 'bottom'. A rolling deadline stays open for the whole drag instead.
   let resizeQuietUntil = 0
+  // Reattach settles get their own deadline. Resize-quiet means "don't let
+  // clamp events touch the anchor" — but during a reattach the viewport can
+  // sit at a clamped WRONG offset for the whole window if we only suppress,
+  // which is exactly the "auto scrolls on tab switch" the user reports.
+  // Inside this window every event is answered by re-pinning to the anchor:
+  // restores are idempotent and the clamps are finite (the scrollArea's
+  // restyle settles in a few frames).
+  let reattachQuietUntil = 0
   // Opt-in scroll forensics for the resize-autoscroll hunt: launch with
   // GITCITO_SCROLL_DEBUG=1 and every decision the listener makes is streamed
   // to userData/gitcito-scroll-debug.log (readable on packaged builds where
@@ -554,6 +562,19 @@ export function getOrCreateTerm(panelId: string, cwd: string, launchId?: number)
       !scrollbarDrag &&
       Date.now() - lastUserScrollAt > 500
     ) {
+      if (Date.now() < reattachQuietUntil) {
+        sdbg(
+          `ev y=${y} base=${buf.baseY} a=${anchor.kind}${anchor.kind === 'line' ? ':' + anchor.y : ''} ` +
+            `w=${writeCount}${domState()} -> quiet-repin`
+        )
+        // A clamp event while a reattach settles leaves the viewport at a
+        // wrong offset for the whole window if merely suppressed — pin it
+        // back to the anchor synchronously. The DOM write answers the clamp
+        // in the same frame it fired, so no bad position ever paints.
+        restoreAnchor()
+        syncDomScrollTop(anchorTarget())
+        return
+      }
       sdbg(
         `ev y=${y} base=${buf.baseY} a=${anchor.kind}${anchor.kind === 'line' ? ':' + anchor.y : ''} ` +
           `w=${writeCount}${domState()} -> quiet-suppress`
@@ -761,8 +782,11 @@ export function getOrCreateTerm(panelId: string, cwd: string, launchId?: number)
           // The reattach settle lasts longer than a drag step: the viewport's
           // scrollHeight re-computes across several frames while clamped
           // scroll events keep arriving. Hold the quiet window open for the
-          // whole settle or each clamp looks like a bottom-follow.
+          // whole settle or each clamp looks like a bottom-follow — and give
+          // the repin window the same span so those clamps are corrected in
+          // place instead of being left painted.
           resizeQuietUntil = Date.now() + 400
+          reattachQuietUntil = resizeQuietUntil
         }
         const before = `${term.cols}x${term.rows}`
         fit.fit()
